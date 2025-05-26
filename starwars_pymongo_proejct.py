@@ -1,128 +1,147 @@
-## PROJECT
-# The data in this database has been pulled from SWAPI - A New Hope. As well as 'people', the API has data on starships. In Python, pull data on all available starships from the API. The "pilots" key contains URLs pointing to the characters who pilot the starship. Use these to replace 'pilots' with a list of ObjectIDs from our characters collection, then insert the starships into their own collection. 
-# Deliverables:
-# Your python file should: query the API, retrieve the starships (only keep useful fields). Transform the pilot list to contain a list of ObjectIds for the relative characters. Load the final starship documents into a new collection in MongoDB.
-# Extensions for project:
-# Improve your code by adding error handling, commenting, unit testing, etc.
-
 import requests
 import json
-import pymongo
+from pymongo import MongoClient
 
-response = requests.get("https://www.swapi.tech/api/starships")
-data = response.json()
-print(data['results'])
+# -----------------------------------------
+# 1. Fetch all starships from the SWAPI API
+# -----------------------------------------
 
-#### 1. Pull data on all available starships from the API
-# FUNCTION TO RETRIEVE DATA FROM API
 def fetch_api_data(url):
-    """Fetches api data from the provided URL and returns the results"""
-    # we want to add all dictionairies to a list starship_dict
+    """Fetch all starships from the SWAPI API"""
     starship_list = []
-    try:    
-        while url:
-            # get url data using requests
-            response = requests.get(url)
-            data = response.json()
-
-            # get the list of starships from the current page
-            starship_list.extend(data["results"])
-
-            # get the list of starships from the next page
-            url = data["next"]
-
-        # make the data look pretty
-        # pretty_starship_list = json.dumps(starship_list, indent=4)
-        return starship_list
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data from API {e}")
-        return None
-
-starship = fetch_api_data("https://www.swapi.tech/api/starships")
-pretty_starship = json.dumps(starship, indent=4)
-print(pretty_starship)
-
-#### 2. Fetch data for each starship in a loop.
-# QUERYING STARSHIP DETAILS
-detailed_starships = []
-
-for ship in starship:
-    detail_url = ship['url']
     try:
-        response = requests.get(detail_url)
-        response.raise_for_status
-        detail_data = response.json()
-        # append the starship details info inside detailed_starships
-        detailed_starships.append(detail_data['result']['properties'])
-        pretty_detailed_starships = json.dumps(detailed_starships, indent=4)
+        while url:
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            starship_list.extend(data["results"])
+            url = data["next"]
+        return starship_list
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching data from API {e}")
-print(pretty_detailed_starships)
-print(f"\nTotal detailed starships fetched: {len(detailed_starships)}")
+        print(f"Error fetching data from API: {e}")
+    except ValueError as ve:
+        print(f"JSON parsing error: {ve}")
+    except KeyError as ke:
+        print(f"Missing expected key: {ke}")
+    return []
 
-#### 3. Retrieve pilot information for each starship
-pilot_list = []
+# -----------------------------------------
+# 2. Get detailed data for each starship
+# -----------------------------------------
 
-for ship in detailed_starships:
-    pilot_urls = ship['pilots']
-    if pilot_urls:
+def get_detailed_starships(starships):
+    """Retrieve full details for each starship."""
+    detailed_starships = []
+    for ship in starships:
+        try:
+            response = requests.get(ship['url'])
+            response.raise_for_status()
+            starship_data = response.json()
+            detailed_starships.append(starship_data['result']['properties'])
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to fetch details for {ship['url']}: {e}")
+    return detailed_starships
+
+# -----------------------------------------
+# 3. Filter required fields from each starship
+# -----------------------------------------
+
+def filter_starship_fields(detailed_starships):
+    """Filter only necessary fields from the detailed starship data."""
+    keys_to_keep = [
+        "name", "manufacturer", "cargo_capacity", "length",
+        "max_atmosphering_speed", "cost_in_credits", "crew",
+        "passengers", "pilots"
+    ]
+    filtered = []
+    for starship in detailed_starships:
+        try:
+            filtered.append({key: starship[key] for key in keys_to_keep})
+        except KeyError as e:
+            print(f"Missing key during filtering: {e}")
+    return filtered
+
+# -----------------------------------------
+# 4. Replace pilot URLs with names
+# -----------------------------------------
+
+def resolve_pilot_names(starships):
+    """Replace pilot URLs with a list of pilot names."""
+    for ship in starships:
+        pilot_urls = ship.get('pilots', [])
+        pilot_names = []
         for url in pilot_urls:
             try:
                 response = requests.get(url)
-                pilot_url = response.json()
-                # append the pilot list to include information about pilots
-                pilot_list.append(pilot_url)
-                pretty_pilot = json.dumps(pilot_list, indent=4)
+                response.raise_for_status()
+                pilot_data = response.json()
+                name = pilot_data['result']['properties']['name']
+                pilot_names.append({"name": name})
             except requests.exceptions.RequestException as e:
-                print(f"Failed to fetch details for {detail_url}: {e}")
-print(pretty_pilot)
-            
+                print(f"Error fetching pilot data from {url}: {e}")
+        ship['pilots'] = pilot_names
+    return starships
 
-#### 3. Replace "pilots" key URL with a list of object IDs from the characters collection (people who pilot the starship) and insert into their own collection.
-pilot_names = []
+# -----------------------------------------
+# 5. Replace pilot names with MongoDB ObjectIds
+# -----------------------------------------
 
-for pilot in pilot_list:
+def map_pilots_to_object_ids(starships, db):
+    """Map pilot names to their ObjectIds in MongoDB."""
+    for ship in starships:
+        pilot_entries = []
+        for pilot in ship.get('pilots', []):
+            name = pilot.get('name')
+            result = db.full_characters.find_one({"name": name}, {"_id": 1})
+            pilot_entries.append({
+                "name": name,
+                "_id": str(result["_id"]) if result else None
+            })
+        ship['pilots'] = pilot_entries
+    return starships
+
+# -----------------------------------------
+# 6. Insert final starship documents into MongoDB
+# -----------------------------------------
+
+def insert_starships_into_mongodb(starships, db):
+    """Insert the starships into the MongoDB 'starships' collection."""
     try:
-        pilots = pilot['result']['properties']['name']
-        pilot_names.append(pilots)
-    except KeyError as e:
-        print(f"Missing key: {e} in pilot data")
-print(pilot_names)
+        db.starships.delete_many({})
+        db.starships.insert_many(starships)
+        print(f"Inserted {len(starships)} starships into MongoDB.")
+    except Exception as e:
+        print(f"Failed to insert starships: {e}")
 
-#### 4. Print out all Object IDs based on character
-# GET DATA FROM MONGON DB FULL_CHARACTERS
-client = pymongo.MongoClient() # CLASS from pymongo, hosts the database connection for usin mongodb://localhost:27017 for us
-db = client['starwars']
+# -----------------------------------------
+# MAIN EXECUTION
+# -----------------------------------------
 
-object_ids = []
+def main():
+    # MongoDB setup
+    client = MongoClient()
+    db = client['starwars']
 
-for character in pilot_names:
-    result = db.full_characters.find({"name":character},{'_id':1,'name':1})
-    for doc in result:
-        object_ids.append(doc)
-        print(doc)
+    # Step 1: Fetch base starship data
+    base_starships = fetch_api_data("https://www.swapi.tech/api/starships")
+    if not base_starships:
+        print("No starships fetched.")
+        return
 
-#### 5. Transform the pilot list to contain a list of ObjectIds for the relative characters. 
-# what should the pilot list contain apart from the name/ object ids?
+    # Step 2: Get full starship details
+    detailed_starships = get_detailed_starships(base_starships)
 
-#### 6. Load the final starship document into a new collection in MongoDB.
-# only use necessary fields i.e uid, name,
-        # "created": "2025-05-21T22:46:50.172Z",
-        # "edited": "2025-05-21T22:46:50.172Z",
-        # "consumables": "1 year",
-        # "name": "CR90 corvette",
-        # "cargo_capacity": "3000000",
-        # "passengers": "600",
-        # "max_atmosphering_speed": "950",
-        # "crew": "30-165",
-        # "length": "150",
-        # "model": "CR90 corvette",
-        # "cost_in_credits": "3500000",
-        # "manufacturer": "Corellian Engineering Corporation",
-        # "pilots": [],
-        # "MGLT": "60",
-        # "starship_class": "corvette",
-        # "hyperdrive_rating": " 
+    # Step 3: Filter for necessary fields
+    filtered_starships = filter_starship_fields(detailed_starships)
 
-# from pilots just their name and object id?
+    # Step 4: Replace pilot URLs with names
+    resolved_starships = resolve_pilot_names(filtered_starships)
+
+    # Step 5: Replace pilot names with ObjectIds from MongoDB
+    final_starships = map_pilots_to_object_ids(resolved_starships, db)
+
+    # Step 6: Insert final documents into MongoDB
+    insert_starships_into_mongodb(final_starships, db)
+
+if __name__ == "__main__":
+    main()
